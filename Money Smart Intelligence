@@ -1,0 +1,1251 @@
+
+// This source code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// (c) MMC Scalper - Gold Scalping Suite
+// MSC v1 - Realism & bug-fix revision
+
+//@version=5
+indicator("MSC - XAUUSD Scalper", "MSC XAUUSD", overlay = true, max_lines_count = 500, max_boxes_count = 500, max_labels_count = 500, max_bars_back = 1000)
+
+//=============================================================================
+// 1. INPUT SETTINGS
+//=============================================================================
+GRP_ASSET   = "MSC: ASSET MODE & AUTO PRESET"
+assetMode   = input.string("XAUUSD (Gold)", "Asset Mode", options = ["XAUUSD (Gold)", "Auto Detect", "BTCUSD (Bitcoin)", "Custom Manual"], group = GRP_ASSET, tooltip = "XAUUSD (Gold): 500 TP1 / 1000 TP2 / 500 E2 / 1000 SL / 200 SnR\nAuto Detect: Automatically configures scale based on ticker\nBTCUSD (Bitcoin): 15000 TP1 / 30000 TP2 / 15000 E2 / 30000 SL / 8000 SnR\nCustom Manual: Uses user-defined values")
+pointSize   = input.float(0.01, "Point Size (0 = auto from syminfo.mintick)", minval = 0.0, step = 0.001, group = GRP_ASSET, tooltip = "Size of 1 point in price unit. For XAUUSD Gold = 0.01 ($0.01). Set 0 to auto-detect from broker mintick")
+
+GRP_SCOPE   = "MMC: RECORDING & TRADE SCOPE"
+recordScope = input.string("From Date (Input)", "Record History Scope", options = ["From Date (Input)", "This Week (Mon - Fri)", "All Chart History"], group = GRP_SCOPE, tooltip = "From Date: Record trades starting from specified date/time below\nThis Week: Record current trading week\nAll Chart History: Record across all bars on chart")
+startTs     = input.time(timestamp("09 Oct 2026 05:00 +0700"), "Record From (Date/Time)", group = GRP_SCOPE)
+
+GRP_SNR     = "MMC: SUPPORT & RESISTANCE & FLIP ZONE"
+pivotDepth  = input.int(4, "Pivot Depth / Lookback", minval = 2, maxval = 25, group = GRP_SNR, tooltip = "Bars left and right for swing high/low")
+minDistPts  = input.int(200, "Min Distance Between Levels (Points)", minval = 50, group = GRP_SNR, tooltip = "Minimum distance between SnR levels (200 pts = $2.00 on XAUUSD)")
+maxLines    = input.int(8, "Max Active SnR Lines", minval = 2, maxval = 20, group = GRP_SNR)
+showSnRLines= input.bool(true, "Show SnR Zone Lines", group = GRP_SNR)
+showLabels  = input.bool(false, "Show Price Labels on Lines", group = GRP_SNR)
+enableFlip  = input.bool(true, "Enable Role Reversal / Flip Zone", group = GRP_SNR, tooltip = "Broken support flips into resistance and vice versa")
+flipDistPts = input.int(200, "Flip Breakout Distance (Points)", minval = 100, group = GRP_SNR)
+reqRejection= input.bool(true, "Require Wick Rejection Filter", group = GRP_SNR, tooltip = "True: Requires candle rejection wick >= Min Wick Ratio and matching candle color\nFalse: Candle direction only (higher trade frequency)")
+colSup      = input.color(#00bcd4, "Support Color (Buy Zone)", group = GRP_SNR)
+colRes      = input.color(#ff9800, "Resistance Color (Sell Zone)", group = GRP_SNR)
+
+GRP_POS     = "POSITION TRADE SETTINGS (SCALPING)"
+enPosition  = input.bool(true, "Enable Position Trade", group = GRP_POS)
+entryTriggerMode = input.string("Confirmed Bounce (Wait Reaction)", "Entry Execution Mode", options = ["Confirmed Bounce (Wait Reaction)", "Instant Touch (Limit Style)"], group = GRP_POS, tooltip = "Confirmed Bounce: Wait for candle close confirmation and enter at close price (realistic, no repaint)\nInstant Touch: Enter immediately at level price upon touch (may repaint during real-time bar)")
+waitOrderFinish = input.bool(true, "Wait Until Order Finished", group = GRP_POS, tooltip = "Wait until current active order hits TP1/SL before accepting new signals")
+lineStyleOpt    = input.string("Solid", "Entry Line Style", options = ["Solid", "Dashed", "Dotted"], group = GRP_POS)
+entryWidth      = input.int(2, "Entry Line Width", minval = 1, maxval = 4, group = GRP_POS)
+targetLineWidth = input.int(2, "TP & SL Line Width", minval = 1, maxval = 4, group = GRP_POS)
+orderAheadBars  = input.int(16, "Order Lines Ahead (Bars)", minval = 5, maxval = 50, group = GRP_POS)
+tp1Pts      = input.float(500.0, "TP1 Base (Points)", minval = 50, step = 50, group = GRP_POS)
+tp2Pts      = input.float(1000.0, "TP2 Base (Points)", minval = 100, step = 50, group = GRP_POS)
+showTp2     = input.bool(true, "Use TP2 Runner", group = GRP_POS, tooltip = "True: Closes half at TP1 and moves remaining runner SL to Breakeven towards TP2\nFalse: Closes full position at TP1")
+runnerBars  = input.int(10, "Runner Max Bars (after TP1)", minval = 2, maxval = 100, group = GRP_POS, tooltip = "Closes runner at market close if TP2 or BE is not reached within N bars after TP1")
+entry2Dist  = input.float(500.0, "Entry 2 Distance (Points)", minval = 50, step = 50, group = GRP_POS)
+slPts       = input.float(1000.0, "SL Base (Points)", minval = 100, step = 50, group = GRP_POS)
+spreadPts   = input.float(25.0, "Spread + Slippage (pts per order)", minval = 0.0, step = 5, group = GRP_POS, tooltip = "Friction cost per order (deducted from each E1 and E2 trade in statistics)\nDefault 25 pts = $0.25 on XAUUSD")
+minWickRatio = input.float(0.35, "Min Rejection Wick Ratio", minval = 0.1, maxval = 0.8, step = 0.05, group = GRP_POS)
+enableTrendFilter = input.bool(true, "Trend Protection (Block Counter-Trend)", group = GRP_POS, tooltip = "Blocks SELL when price is > N x ATR above EMA50; blocks BUY when price is < N x ATR below EMA50")
+trendAtrMult = input.float(2.0, "Trend Filter Distance (x ATR)", minval = 0.5, maxval = 6.0, step = 0.1, group = GRP_POS)
+enableRecovery = input.bool(true, "Enable Recovery Exit (E2)", group = GRP_POS, tooltip = "True: When E2 triggers and price returns to E1, closes full basket at E1 price (E1 breakeven, E2 profit)\nFalse: Exits only at TP or SL")
+cooldownBars= input.int(2, "Signal Cooldown (Bars)", minval = 1, maxval = 15, group = GRP_POS)
+resetHour   = input.int(5, "Gold Market Reset Hour", minval = 0, maxval = 23, group = GRP_POS, tooltip = "Trading day reset hour in selected timezone (5 = 05:00 AM Bangkok Time)")
+tzInput     = input.string("Asia/Bangkok", "Timezone", group = GRP_POS)
+enAlerts    = input.bool(true, "Enable alert() with real Entry/TP/SL", group = GRP_POS, tooltip = "When creating alert in TradingView, choose Any alert() function call")
+
+GRP_DASH    = "COMBINED DASHBOARD (BACKTEST STATS)"
+showDash    = input.bool(true, "Show Dashboard", group = GRP_DASH)
+dashView    = input.string("Vertical Today", "View Format", options = ["Vertical Today", "Pro Summary", "Full Matrix", "Weekly Detail", "Daily Detail"], group = GRP_DASH)
+dashPos     = input.string("Bottom Right", "Dashboard Position", options = ["Bottom Right", "Bottom Center", "Top Right", "Top Center", "Top Left", "Bottom Left"], group = GRP_DASH)
+dashTextSize= input.string("Small", "Dashboard Text Size", options = ["Small", "Tiny", "Normal", "Large"], group = GRP_DASH)
+showHistoryRows = input.bool(false, "Show Yesterday & Week Breakdown (for Pro Summary)", group = GRP_DASH)
+monthChoice = input.string("Current Month", "Select Month (for Matrix/Month view)", options = ["Current Month", "Previous Month", "Last 4 Weeks", "Custom Month Offset"], group = GRP_DASH)
+monthOffset = input.int(1, "Month Offset (for Custom)", minval = 0, maxval = 24, group = GRP_DASH, tooltip = "0 = Current Month, 1 = Previous Month...")
+showTodayCard = input.bool(false, "Show Separate Today Box", group = GRP_DASH)
+todayCardPos  = input.string("Top Center", "Today Box Position", options = ["Top Right", "Top Center", "Top Left"], group = GRP_DASH)
+todayCardSize = input.string("Normal", "Today Box Text Size", options = ["Normal", "Large", "Small"], group = GRP_DASH)
+
+GRP_GHOST       = "MMC: GHOST LINES (PROJECTED SETUP AHEAD)"
+showGhostLines  = input.bool(true, "Show Ghost Radar Lines", group = GRP_GHOST)
+ghostLength     = input.int(12, "Ghost Line Length (Bars Ahead)", minval = 5, maxval = 40, group = GRP_GHOST)
+showGhostLabels = input.bool(true, "Show Ghost Target Badges", group = GRP_GHOST)
+
+//=============================================================================
+// 2. SCALE & MARKET REGIME CALCULATIONS
+//=============================================================================
+isBtcActive = assetMode == "BTCUSD (Bitcoin)" or (assetMode == "Auto Detect" and (str.contains(str.upper(syminfo.ticker), "BTC") or str.contains(str.upper(syminfo.ticker), "BITCOIN")))
+isCustom    = assetMode == "Custom Manual"
+
+ptVal       = pointSize > 0 ? pointSize : syminfo.mintick
+
+effTp1Pts   = isCustom ? tp1Pts : (isBtcActive ? 15000.0 : tp1Pts)
+effTp2Pts   = isCustom ? tp2Pts : (isBtcActive ? 30000.0 : tp2Pts)
+effSlPts    = isCustom ? slPts  : (isBtcActive ? 30000.0 : slPts)
+effE2Dist   = isCustom ? entry2Dist : (isBtcActive ? 15000.0 : entry2Dist)
+effMinDist  = isCustom ? float(minDistPts) : (isBtcActive ? 8000.0 : float(minDistPts))
+effFlipDist = isCustom ? float(flipDistPts) : (isBtcActive ? 4000.0 : float(flipDistPts))
+effSpread   = isCustom ? spreadPts : (isBtcActive ? spreadPts * 30.0 : spreadPts)
+
+tp1Val      = effTp1Pts * ptVal
+tp2Val      = effTp2Pts * ptVal
+e2Val       = effE2Dist * ptVal
+slVal       = effSlPts * ptVal
+minDistVal  = effMinDist * ptVal
+flipDistVal = effFlipDist * ptVal
+
+curLineStyle = lineStyleOpt == "Dashed" ? line.style_dashed : lineStyleOpt == "Dotted" ? line.style_dotted : line.style_solid
+isInstantTouch = entryTriggerMode == "Instant Touch (Limit Style)"
+
+atrVal  = ta.atr(14)
+atrRef  = nz(atrVal[1], atrVal)
+
+isHugeBearCandle = (open - close) > (2.0 * atrRef)
+isHugeBullCandle = (close - open) > (2.0 * atrRef)
+
+emaFast = ta.ema(close, 20)
+emaSlow = ta.ema(close, 50)
+trendFiltThresh = trendAtrMult * atrRef
+distEma      = close - emaSlow
+isStrongBull = distEma > trendFiltThresh
+isStrongBear = distEma < -trendFiltThresh
+canBuyTrend  = not (enableTrendFilter and isStrongBear)
+canSellTrend = not (enableTrendFilter and isStrongBull)
+
+isSpikeNews   = (high - low) > 2.2 * atrRef
+isStrongTrend = math.abs(emaFast - emaSlow) > atrRef and math.abs(distEma) > trendFiltThresh
+
+string marketRegimeTxt = "NORMAL (SAFE)"
+color  marketRegimeCol = color.green
+if isSpikeNews
+    marketRegimeTxt := "NEWS / SPIKE ALERT"
+    marketRegimeCol := color.red
+else if isStrongTrend
+    marketRegimeTxt := (close > emaSlow ? "STRONG BULL (SELL CAUTION)" : "STRONG BEAR (BUY CAUTION)")
+    marketRegimeCol := color.red
+
+//=============================================================================
+// 3. TRADING-DAY / WEEK / MONTH CALENDAR (SHIFTED BY RESET HOUR)
+//=============================================================================
+tradeTs         = time - resetHour * 3600000
+curTradingMonth = month(tradeTs, tzInput)
+curTradingDay   = dayofmonth(tradeTs, tzInput)
+curTradingDow   = dayofweek(tradeTs, tzInput)
+curYearT        = year(tradeTs, tzInput)
+curHour         = hour(time, tzInput)
+
+curMonthId = curYearT * 100 + curTradingMonth
+curDayKey  = curMonthId * 100 + curTradingDay
+
+int dow0      = (curTradingDow + 5) % 7        // Mon = 0 ... Sun = 6
+int curDowIdx = dow0 <= 4 ? dow0 : (dow0 == 6 ? 0 : 4)
+
+weekAnchor = dow0 == 6 ? tradeTs + 86400000 : tradeTs - dow0 * 86400000   // Monday of the trading week
+curWeekId  = year(weekAnchor, tzInput) * 10000 + month(weekAnchor, tzInput) * 100 + dayofmonth(weekAnchor, tzInput)
+
+firstDowOfMonth = ((dow0 - (curTradingDay - 1)) % 7 + 7) % 7
+int curWeekOfMonth = math.min(4, math.max(0, math.floor((curTradingDay - 1 + firstDowOfMonth) / 7)))
+
+nowTs      = timenow - resetHour * 3600000
+nowDow0    = (dayofweek(nowTs, tzInput) + 5) % 7
+nowAnchor  = nowDow0 == 6 ? nowTs + 86400000 : nowTs - nowDow0 * 86400000
+nowWeekId  = year(nowAnchor, tzInput) * 10000 + month(nowAnchor, tzInput) * 100 + dayofmonth(nowAnchor, tzInput)
+isWeekendNow = not isBtcActive and nowDow0 >= 5
+
+isAllowedBar = (recordScope == "All Chart History") or (recordScope == "From Date (Input)" and time >= startTs) or (recordScope == "This Week (Mon - Fri)" and curWeekId == nowWeekId)
+
+monthChg = ta.change(curMonthId) != 0
+weekChg  = ta.change(curWeekId) != 0
+dayChg   = ta.change(curDayKey) != 0
+
+var array<int> allMonthIds = array.new<int>(0)
+if bar_index == 0 or monthChg
+    allMonthIds.push(curMonthId)
+
+var array<int> allWeekIds = array.new<int>(0)
+if bar_index == 0 or weekChg
+    allWeekIds.push(curWeekId)
+
+var int prevDayKey = na
+prevBarDayKey = curDayKey[1]
+if dayChg and not na(prevBarDayKey)
+    prevDayKey := prevBarDayKey
+
+var float dayHigh = na
+var float dayLow  = na
+if dayChg or na(dayHigh)
+    dayHigh := high
+    dayLow  := low
+else
+    dayHigh := math.max(dayHigh, high)
+    dayLow  := math.min(dayLow, low)
+
+goldDayRangePts = math.round((dayHigh - dayLow) / ptVal)
+
+goldSession    = (curHour >= 19 or curHour < 4) ? "NEW YORK" : (curHour >= 13 and curHour < 19) ? "LONDON" : "ASIA / TOKYO"
+goldSessionCol = goldSession == "NEW YORK" ? color.green : goldSession == "LONDON" ? color.new(#00e5ff, 0) : color.white
+
+//=============================================================================
+// 4. SUPPORT & RESISTANCE WITH FLIP LOGIC
+//=============================================================================
+type SnRLevel
+    float p
+    bool  isSup
+    int   lastUsedBar
+    bool  isTriggered
+    line  ln
+    label lb
+
+var array<SnRLevel> snrList = array.new<SnRLevel>(0)
+
+ph = ta.pivothigh(high, pivotDepth, pivotDepth)
+pl = ta.pivotlow(low, pivotDepth, pivotDepth)
+
+f_addLevel(float price, bool isSupport) =>
+    bool tooClose = false
+    if snrList.size() > 0
+        for i = 0 to snrList.size() - 1
+            if math.abs(snrList.get(i).p - price) < minDistVal
+                tooClose := true
+                break
+    if not tooClose
+        line l = na
+        label b = na
+        if showSnRLines
+            l := line.new(bar_index - pivotDepth, price, bar_index + 10, price, color = isSupport ? colSup : colRes, width = 1, style = line.style_solid)
+        if showLabels
+            b := label.new(bar_index, price, (isSupport ? "SUP " : "RES ") + str.tostring(price, "#.##"), color = color.new(color.black, 100), textcolor = isSupport ? colSup : colRes, style = label.style_none, size = size.tiny)
+        snrList.unshift(SnRLevel.new(price, isSupport, -999, false, l, b))
+        if snrList.size() > maxLines
+            old = snrList.pop()
+            if not na(old.ln)
+                line.delete(old.ln)
+            if not na(old.lb)
+                label.delete(old.lb)
+
+if not na(ph)
+    f_addLevel(ph, false)
+if not na(pl)
+    f_addLevel(pl, true)
+
+if snrList.size() > 0
+    for i = 0 to snrList.size() - 1
+        item = snrList.get(i)
+        if enableFlip
+            if item.isSup and close < (item.p - flipDistVal)
+                item.isSup := false
+                item.isTriggered := false
+                if not na(item.ln)
+                    line.set_color(item.ln, colRes)
+                if not na(item.lb)
+                    label.set_textcolor(item.lb, colRes)
+                    label.set_text(item.lb, "RES (FLIP) " + str.tostring(item.p, "#.##"))
+            else if not item.isSup and close > (item.p + flipDistVal)
+                item.isSup := true
+                item.isTriggered := false
+                if not na(item.ln)
+                    line.set_color(item.ln, colSup)
+                if not na(item.lb)
+                    label.set_textcolor(item.lb, colSup)
+                    label.set_text(item.lb, "SUP (FLIP) " + str.tostring(item.p, "#.##"))
+        if not na(item.ln)
+            line.set_x2(item.ln, bar_index + 10)
+        if not na(item.lb)
+            label.set_x(item.lb, bar_index + 2)
+
+f_cleanOldLines() =>
+    if snrList.size() > 0
+        for i = snrList.size() - 1 to 0
+            item = snrList.get(i)
+            if item.lastUsedBar > 0 and bar_index - item.lastUsedBar > 500
+                snrList.remove(i)
+                if not na(item.ln)
+                    line.delete(item.ln)
+                if not na(item.lb)
+                    label.delete(item.lb)
+
+if bar_index % 50 == 0
+    f_cleanOldLines()
+
+//=============================================================================
+// 5. TYPES, STORAGE & HELPERS
+//=============================================================================
+type TradeLog
+    int   monthId
+    int   weekId
+    int   weekOfMonth
+    int   dayKey
+    int   dowIdx
+    bool  isTp1
+    bool  isTp2
+    bool  isSl
+    bool  isRec
+    bool  isFc
+    bool  isWin
+    float pts
+
+type PosPlan
+    int    side
+    float  e1
+    float  e2
+    float  tp1
+    float  tp2
+    float  sl
+    float  snrPrice  = na
+    bool   e2Active   = false
+    bool   tp1Reached = false
+    bool   tp2Reached = false
+    bool   slReached  = false
+    bool   isDone     = false
+    bool   isWin      = false
+    int    startBar
+    int    tp1Bar     = -1
+    int    e2Bar      = -1
+    int    dayKey
+    int    monthId
+    int    weekId
+    int    weekOfMonth
+    int    dowIdx
+    int    logIdx     = -1
+    line   lnE1
+    line   lnE2
+    line   lnTp1
+    line   lnTp2
+    line   lnSl
+    line   lnRecovery
+    label  tag1
+    label  tag2
+    label  tagE1Price
+    label  tagTp1
+    label  tagTp2
+    label  tagLoss
+    label  tagRecovery
+    label  tagRecPrice
+
+type Stat
+    int   trades = 0
+    int   tp1    = 0
+    int   tp2    = 0
+    int   sl     = 0
+    int   rec    = 0
+    int   fc     = 0
+    int   wins   = 0
+    float pts    = 0.0
+    float gp     = 0.0
+    float gl     = 0.0
+
+method addTrade(Stat this, TradeLog t) =>
+    this.trades := this.trades + 1
+    if t.isTp1
+        this.tp1 := this.tp1 + 1
+    if t.isTp2
+        this.tp2 := this.tp2 + 1
+    if t.isSl
+        this.sl := this.sl + 1
+    if t.isRec
+        this.rec := this.rec + 1
+    if t.isFc
+        this.fc := this.fc + 1
+    if t.isWin
+        this.wins := this.wins + 1
+    this.pts := this.pts + t.pts
+    if t.pts > 0
+        this.gp := this.gp + t.pts
+    else if t.pts < 0
+        this.gl := this.gl - t.pts
+    this
+
+var array<TradeLog> tradeHistory = array.new<TradeLog>(0)
+var array<PosPlan>  plans        = array.new<PosPlan>(0)
+var int             lastSignalBar = -999
+var array<int>      realtimeBarLock = array.new<int>(1, -999)
+var array<int>      labelStackTop   = array.new<int>(2, -999)
+var array<int>      labelStackBot   = array.new<int>(2, -999)
+
+bool hasActiveTrade = false
+
+f_getTopY(float yBase) =>
+    float y = yBase
+    int lastB = labelStackTop.get(0)
+    int cnt   = labelStackTop.get(1)
+    if bar_index == lastB
+        cnt := cnt + 1
+        labelStackTop.set(1, cnt)
+        y := yBase + cnt * 0.42 * atrVal
+    else if bar_index == lastB + 1
+        labelStackTop.set(0, bar_index)
+        labelStackTop.set(1, 1)
+        y := yBase + 0.35 * atrVal
+    else
+        labelStackTop.set(0, bar_index)
+        labelStackTop.set(1, 0)
+        y := yBase
+    y
+
+f_getBotY(float yBase) =>
+    float y = yBase
+    int lastB = labelStackBot.get(0)
+    int cnt   = labelStackBot.get(1)
+    if bar_index == lastB
+        cnt := cnt + 1
+        labelStackBot.set(1, cnt)
+        y := yBase - cnt * 0.42 * atrVal
+    else if bar_index == lastB + 1
+        labelStackBot.set(0, bar_index)
+        labelStackBot.set(1, 1)
+        y := yBase - 0.35 * atrVal
+    else
+        labelStackBot.set(0, bar_index)
+        labelStackBot.set(1, 0)
+        y := yBase
+    y
+
+// Open P/L in points of all legs (E1 + E2 if active) at a given price
+f_legPts(PosPlan p, float price) =>
+    float r = p.side * (price - p.e1) / ptVal
+    if p.e2Active
+        r += p.side * (price - p.e2) / ptVal
+    r
+
+// Reset isTriggered on the SnR level that spawned this plan,
+// so the level can generate a new signal after the trade is finished.
+f_resetSnrTrigger(float price) =>
+    if not na(price) and snrList.size() > 0
+        for i = 0 to snrList.size() - 1
+            s = snrList.get(i)
+            if math.abs(s.p - price) < ptVal * 0.5
+                s.isTriggered := false
+                break
+
+// Log a closed trade (spread/slippage deducted per leg)
+f_logTrade(PosPlan p, bool isTp1, bool isTp2, bool isSl, bool isRec, bool isFc, float pts) =>
+    float net = pts - (p.e2Active ? 2.0 : 1.0) * effSpread
+    TradeLog t = TradeLog.new(p.monthId, p.weekId, p.weekOfMonth, p.dayKey, p.dowIdx, isTp1, isTp2, isSl, isRec, isFc, net > 0, net)
+    tradeHistory.push(t)
+    p.logIdx := tradeHistory.size() - 1
+    t
+
+// Remove drawings of a plan (flags decide which result labels survive)
+f_clearGfx(PosPlan p, bool keepTp1Lbl, bool keepLossLbl, bool keepRecLbl, bool keepRunner) =>
+    if not na(p.lnE1)
+        line.delete(p.lnE1)
+        p.lnE1 := na
+    if not na(p.lnE2)
+        line.delete(p.lnE2)
+        p.lnE2 := na
+    if not na(p.lnTp1)
+        line.delete(p.lnTp1)
+        p.lnTp1 := na
+    if not na(p.lnSl)
+        line.delete(p.lnSl)
+        p.lnSl := na
+    if not na(p.lnRecovery)
+        line.delete(p.lnRecovery)
+        p.lnRecovery := na
+    if not na(p.tagE1Price)
+        label.delete(p.tagE1Price)
+        p.tagE1Price := na
+    if not na(p.tagRecPrice)
+        label.delete(p.tagRecPrice)
+        p.tagRecPrice := na
+    if not keepRunner
+        if not na(p.lnTp2)
+            line.delete(p.lnTp2)
+            p.lnTp2 := na
+        if not na(p.tagTp2)
+            label.delete(p.tagTp2)
+            p.tagTp2 := na
+    if not keepTp1Lbl and not na(p.tagTp1)
+        label.delete(p.tagTp1)
+        p.tagTp1 := na
+    if not keepLossLbl and not na(p.tagLoss)
+        label.delete(p.tagLoss)
+        p.tagLoss := na
+    if not keepRecLbl and not na(p.tagRecovery)
+        label.delete(p.tagRecovery)
+        p.tagRecovery := na
+    p
+
+// Fully delete everything a plan drew (used by history cleanup)
+f_deleteAllGfx(PosPlan p) =>
+    f_clearGfx(p, false, false, false, false)
+    if not na(p.tag1)
+        label.delete(p.tag1)
+        p.tag1 := na
+    if not na(p.tag2)
+        label.delete(p.tag2)
+        p.tag2 := na
+    p
+
+// Close the runner half (after TP1) at a price
+f_finishRunner(PosPlan p, float px, bool hitTp2) =>
+    float addPts = 0.5 * f_legPts(p, px)
+    if p.logIdx >= 0 and p.logIdx < tradeHistory.size()
+        TradeLog tl = tradeHistory.get(p.logIdx)
+        tl.pts := tl.pts + addPts
+        tl.isTp2 := hitTp2
+        tl.isWin := tl.pts > 0
+    p.tp2Reached := hitTp2
+    p.isDone := true
+    f_resetSnrTrigger(p.snrPrice)
+    if hitTp2 and not na(p.tagTp2)
+        float yy = p.side == 1 ? f_getTopY(high) : f_getBotY(low)
+        label.set_xy(p.tagTp2, bar_index, yy)
+        label.set_text(p.tagTp2, "TP2 HIT\n" + str.tostring(p.tp2, "#.##"))
+        label.set_style(p.tagTp2, p.side == 1 ? label.style_label_down : label.style_label_up)
+        label.set_color(p.tagTp2, color.new(#00bfa5, 0))
+        label.set_textcolor(p.tagTp2, color.white)
+        label.set_size(p.tagTp2, size.small)
+    else if not na(p.tagTp2)
+        label.delete(p.tagTp2)
+        p.tagTp2 := na
+    if not na(p.lnTp2)
+        line.delete(p.lnTp2)
+        p.lnTp2 := na
+    p
+
+// Close an open plan at market (new signal replaces it)
+f_settleMarket(PosPlan p) =>
+    if p.tp1Reached
+        f_finishRunner(p, close, false)
+    else
+        f_logTrade(p, false, false, false, false, true, f_legPts(p, close))
+        f_clearGfx(p, false, false, false, false)
+        p.isDone := true
+        f_resetSnrTrigger(p.snrPrice)
+    p
+
+f_activeIdx() =>
+    int r = -1
+    if plans.size() > 0
+        for i = 0 to plans.size() - 1
+            q = plans.get(i)
+            if not q.isDone and not q.tp1Reached
+                r := i
+                break
+    r
+
+f_extendGfx(PosPlan p, int newEnd) =>
+    if not na(p.lnE1)
+        line.set_x2(p.lnE1, newEnd)
+    if not na(p.lnE2) and not p.e2Active
+        line.set_x2(p.lnE2, newEnd)
+    if not na(p.lnTp1)
+        line.set_x2(p.lnTp1, newEnd)
+    if not na(p.lnSl)
+        line.set_x2(p.lnSl, newEnd)
+    if not na(p.lnTp2)
+        line.set_x2(p.lnTp2, newEnd)
+    if not na(p.lnRecovery)
+        line.set_x2(p.lnRecovery, newEnd)
+    if not na(p.tagE1Price)
+        label.set_x(p.tagE1Price, newEnd)
+    if not na(p.tagTp1) and not p.tp1Reached
+        label.set_x(p.tagTp1, newEnd)
+    if not na(p.tagLoss) and not p.tp1Reached
+        label.set_x(p.tagLoss, newEnd)
+    if not na(p.tagTp2)
+        label.set_x(p.tagTp2, newEnd)
+    if not na(p.tagRecPrice)
+        label.set_x(p.tagRecPrice, newEnd)
+    p
+
+// Build a new order. Entry = SnR level (Instant) or bar close (Confirmed).
+f_openPlan(int side, float lvl, int snrIdx) =>
+    if plans.size() > 0
+        for pi = 0 to plans.size() - 1
+            oldP = plans.get(pi)
+            if not oldP.isDone
+                f_settleMarket(oldP)
+
+    realtimeBarLock.set(0, bar_index)
+    sItem = snrList.get(snrIdx)
+    sItem.lastUsedBar := bar_index
+    sItem.isTriggered := true
+    snrList.set(snrIdx, sItem)
+
+    float e1Price  = isInstantTouch ? lvl : close
+    float e2Price  = e1Price - side * e2Val
+    float tp1Price = e1Price + side * tp1Val
+    float tp2Price = e1Price + side * tp2Val
+    float slPrice  = e1Price - side * slVal
+    int   endB     = bar_index + orderAheadBars
+
+    color eCol  = side == 1 ? color.new(#00e5ff, 0) : color.new(#ff3d00, 0)
+    color e2Col = side == 1 ? color.new(#0288d1, 0) : color.new(#c62828, 0)
+    color lblCol = side == 1 ? color.new(#0288d1, 0) : color.new(#d32f2f, 0)
+    string nm   = side == 1 ? "BUY" : "SELL"
+    string strE1 = str.tostring(e1Price, "#.##")
+
+    line ln1  = line.new(bar_index, e1Price, endB, e1Price, color = eCol, style = curLineStyle, width = entryWidth)
+    line ln2  = line.new(bar_index, e2Price, endB, e2Price, color = e2Col, style = line.style_dashed, width = targetLineWidth)
+    line lTp1 = line.new(bar_index, tp1Price, endB, tp1Price, color = color.new(#00e676, 0), style = line.style_solid, width = targetLineWidth)
+    line lTp2 = showTp2 ? line.new(bar_index, tp2Price, endB, tp2Price, color = color.new(#00c853, 0), style = line.style_solid, width = targetLineWidth) : na
+    line lSl  = line.new(bar_index, slPrice, endB, slPrice, color = color.new(#ff1744, 0), style = line.style_solid, width = targetLineWidth)
+
+    float yTag = side == 1 ? f_getBotY(low) : f_getTopY(high)
+    label t1 = label.new(bar_index, yTag, nm + " 1\n" + strE1, color = lblCol, textcolor = color.white, style = side == 1 ? label.style_label_up : label.style_label_down, size = size.small)
+    label tE1Price = label.new(endB, e1Price, nm + " " + strE1, color = lblCol, textcolor = color.white, style = label.style_label_left, size = size.small)
+    label tTp1 = label.new(endB, tp1Price, "TARGET TP1 @" + str.tostring(tp1Price, "#.##"), color = color.new(#052e2b, 0), textcolor = #00e676, style = label.style_label_left, size = size.small)
+    label tTp2 = showTp2 ? label.new(endB, tp2Price, "TARGET TP2 @" + str.tostring(tp2Price, "#.##"), color = color.new(#052e2b, 0), textcolor = #00c853, style = label.style_label_left, size = size.small) : na
+    label tLoss = label.new(endB, slPrice, "TARGET SL @" + str.tostring(slPrice, "#.##"), color = color.new(#3b1219, 0), textcolor = #ff1744, style = label.style_label_left, size = size.small)
+
+    PosPlan np = PosPlan.new(side = side, e1 = e1Price, e2 = e2Price, tp1 = tp1Price, tp2 = tp2Price, sl = slPrice, snrPrice = lvl, startBar = bar_index, dayKey = curDayKey, monthId = curMonthId, weekId = curWeekId, weekOfMonth = curWeekOfMonth, dowIdx = curDowIdx, lnE1 = ln1, lnE2 = ln2, lnTp1 = lTp1, lnTp2 = lTp2, lnSl = lSl, tag1 = t1, tagE1Price = tE1Price, tagTp1 = tTp1, tagTp2 = tTp2, tagLoss = tLoss)
+    plans.unshift(np)
+    np
+
+//=============================================================================
+// 6. SIGNAL DETECTION
+//=============================================================================
+cRange    = high - low
+lowerWick = math.min(open, close) - low
+upperWick = high - math.max(open, close)
+hasBuyRejection  = cRange > 0 and (reqRejection ? (lowerWick / cRange >= minWickRatio and close > open) : close > open)
+hasSellRejection = cRange > 0 and (reqRejection ? (upperWick / cRange >= minWickRatio and close < open) : close < open)
+
+canTakeTrade = not waitOrderFinish or f_activeIdx() < 0
+
+bool  sigBuy  = false
+bool  sigSell = false
+float targetLevelPrice = na
+int   targetSnRIdx = -1
+
+if isAllowedBar and snrList.size() > 0 and (bar_index - lastSignalBar > cooldownBars) and canTakeTrade and (realtimeBarLock.get(0) != bar_index) and (isInstantTouch or barstate.isconfirmed)
+    for i = 0 to snrList.size() - 1
+        s = snrList.get(i)
+        if not s.isTriggered and (bar_index - s.lastUsedBar > 2)
+            if s.isSup and low <= s.p and canBuyTrend and (isInstantTouch or (close >= s.p and hasBuyRejection and not isHugeBearCandle))
+                sigBuy := true
+                targetLevelPrice := s.p
+                targetSnRIdx := i
+                break
+            else if not s.isSup and high >= s.p and canSellTrend and (isInstantTouch or (close <= s.p and hasSellRejection and not isHugeBullCandle))
+                sigSell := true
+                targetLevelPrice := s.p
+                targetSnRIdx := i
+                break
+
+alertFreq = isInstantTouch ? alert.freq_once_per_bar : alert.freq_once_per_bar_close
+
+if enPosition and sigBuy and not na(targetLevelPrice) and targetSnRIdx >= 0 and targetSnRIdx < snrList.size()
+    newPlan = f_openPlan(1, targetLevelPrice, targetSnRIdx)
+    lastSignalBar := bar_index
+    hasActiveTrade := true
+    if enAlerts
+        alert("BUY " + syminfo.ticker + " E1=" + str.tostring(newPlan.e1, "#.##") + " TP1=" + str.tostring(newPlan.tp1, "#.##") + " TP2=" + str.tostring(newPlan.tp2, "#.##") + " SL=" + str.tostring(newPlan.sl, "#.##"), alertFreq)
+
+if enPosition and sigSell and not na(targetLevelPrice) and targetSnRIdx >= 0 and targetSnRIdx < snrList.size()
+    newPlan = f_openPlan(-1, targetLevelPrice, targetSnRIdx)
+    lastSignalBar := bar_index
+    hasActiveTrade := true
+    if enAlerts
+        alert("SELL " + syminfo.ticker + " E1=" + str.tostring(newPlan.e1, "#.##") + " TP1=" + str.tostring(newPlan.tp1, "#.##") + " TP2=" + str.tostring(newPlan.tp2, "#.##") + " SL=" + str.tostring(newPlan.sl, "#.##"), alertFreq)
+
+//=============================================================================
+// 7. POSITION TRACKING (BUY & SELL SHARE ONE ENGINE)
+//=============================================================================
+// Intrabar order is unknown, so ambiguous bars are resolved conservatively:
+//  - SL beats TP/REC on the same bar
+//  - E2 and TP1/REC are not allowed on the same bar E2 activates
+//  - REC (back at E1) is reached before TP1 once E2 is active
+//  - runner: Breakeven stop beats TP2 on the same bar
+if plans.size() > 0
+    for idx = plans.size() - 1 to 0
+        p = plans.get(idx)
+        if not p.isDone
+            f_extendGfx(p, bar_index + orderAheadBars)
+
+            // --- E2 activation (never on the entry bar) ---
+            bool e2Touch = p.side == 1 ? low <= p.e2 : high >= p.e2
+            if bar_index > p.startBar and not p.e2Active and not p.tp1Reached and e2Touch
+                p.e2Active := true
+                p.e2Bar := bar_index
+                float y2 = p.side == 1 ? f_getBotY(low) : f_getTopY(high)
+                p.tag2 := label.new(bar_index, y2, (p.side == 1 ? "BUY 2\n" : "SELL 2\n") + str.tostring(p.e2, "#.##"), color = p.side == 1 ? color.new(#0288d1, 0) : color.new(#ff5252, 0), textcolor = color.white, style = p.side == 1 ? label.style_label_up : label.style_label_down, size = size.tiny)
+                if enableRecovery
+                    p.lnRecovery := line.new(bar_index, p.e1, bar_index + orderAheadBars, p.e1, color = color.new(#ffea00, 0), style = line.style_dashed, width = 2)
+                    p.tagRecPrice := label.new(bar_index + orderAheadBars, p.e1, "REC EXIT @" + str.tostring(p.e1, "#.##"), color = color.new(#423b05, 0), textcolor = #ffea00, style = label.style_label_left, size = size.small)
+
+            // --- Exit evaluation (strictly after the entry bar) ---
+            if bar_index > p.startBar and not p.isDone
+                if not p.tp1Reached
+                    bool hitSl  = p.side == 1 ? low <= p.sl : high >= p.sl
+                    bool hitTp1 = p.side == 1 ? high >= p.tp1 : low <= p.tp1
+                    bool e2ThisBar = p.e2Active and p.e2Bar == bar_index
+                    bool hitRec = enableRecovery and p.e2Active and not e2ThisBar and (p.side == 1 ? high >= p.e1 : low <= p.e1)
+
+                    if e2ThisBar
+                        hitTp1 := false
+                    if hitRec
+                        hitTp1 := false
+                    if hitSl
+                        hitTp1 := false
+                        hitRec := false
+
+                    if hitSl
+                        p.slReached := true
+                        p.isDone := true
+                        f_resetSnrTrigger(p.snrPrice)
+                        f_logTrade(p, false, false, true, false, false, f_legPts(p, p.sl))
+                        if not na(p.tagLoss)
+                            float slY = p.side == 1 ? f_getBotY(low) : f_getTopY(high)
+                            label.set_xy(p.tagLoss, bar_index, slY)
+                            label.set_text(p.tagLoss, (p.e2Active ? "SL (E1+E2)\n" : "SL HIT\n") + str.tostring(p.sl, "#.##"))
+                            label.set_style(p.tagLoss, p.side == 1 ? label.style_label_up : label.style_label_down)
+                            label.set_color(p.tagLoss, color.new(#d32f2f, 0))
+                            label.set_textcolor(p.tagLoss, color.white)
+                            label.set_size(p.tagLoss, size.small)
+                        f_clearGfx(p, false, true, false, false)
+
+                    else if hitRec
+                        p.isDone := true
+                        p.isWin := true
+                        f_resetSnrTrigger(p.snrPrice)
+                        f_logTrade(p, false, false, false, true, false, f_legPts(p, p.e1))
+                        float recY = p.side == 1 ? f_getTopY(high) : f_getBotY(low)
+                        p.tagRecovery := label.new(bar_index, recY, "REC EXIT\n" + str.tostring(p.e1, "#.##"), color = color.new(#00bfa5, 0), textcolor = color.white, style = p.side == 1 ? label.style_label_down : label.style_label_up, size = size.small)
+                        f_clearGfx(p, false, false, true, false)
+
+                    else if hitTp1
+                        p.tp1Reached := true
+                        p.tp1Bar := bar_index
+                        p.isWin := true
+                        float tp1Total = f_legPts(p, p.tp1)
+                        f_logTrade(p, true, false, false, false, false, showTp2 ? 0.5 * tp1Total : tp1Total)
+                        if not showTp2
+                            p.isDone := true
+                            f_resetSnrTrigger(p.snrPrice)
+                        if not na(p.tagTp1)
+                            float tp1Y = p.side == 1 ? f_getTopY(high) : f_getBotY(low)
+                            label.set_xy(p.tagTp1, bar_index, tp1Y)
+                            label.set_text(p.tagTp1, "TP1 HIT\n" + str.tostring(p.tp1, "#.##"))
+                            label.set_style(p.tagTp1, p.side == 1 ? label.style_label_down : label.style_label_up)
+                            label.set_color(p.tagTp1, color.new(#00bfa5, 0))
+                            label.set_textcolor(p.tagTp1, color.white)
+                            label.set_size(p.tagTp1, size.small)
+                        f_clearGfx(p, true, false, false, showTp2)
+
+                else if bar_index > p.tp1Bar
+                    // Runner half: SL moved to breakeven (E1), target TP2
+                    bool rBE  = p.side == 1 ? low <= p.e1 : high >= p.e1
+                    bool rTp2 = p.side == 1 ? high >= p.tp2 : low <= p.tp2
+                    if rBE
+                        f_finishRunner(p, p.e1, false)
+                    else if rTp2
+                        f_finishRunner(p, p.tp2, true)
+                    else if bar_index - p.tp1Bar >= runnerBars
+                        f_finishRunner(p, close, false)
+
+hasActiveTrade := f_activeIdx() >= 0
+
+// Cleanup of finished orders (single routine: removes data AND drawings)
+if plans.size() > 0
+    for idx = plans.size() - 1 to 0
+        pc = plans.get(idx)
+        if pc.isDone and (plans.size() > 80 or bar_index - pc.startBar > 1500)
+            f_deleteAllGfx(pc)
+            plans.remove(idx)
+
+//=============================================================================
+// 8. GHOST LINES (PROJECTED SETUP RADAR)
+//=============================================================================
+var line  ghostBuyLine  = na
+var line  ghostSellLine = na
+var label ghostBuyLbl   = na
+var label ghostSellLbl  = na
+
+f_clearGhostBuy() =>
+    if not na(ghostBuyLine)
+        line.delete(ghostBuyLine)
+    if not na(ghostBuyLbl)
+        label.delete(ghostBuyLbl)
+
+f_clearGhostSell() =>
+    if not na(ghostSellLine)
+        line.delete(ghostSellLine)
+    if not na(ghostSellLbl)
+        label.delete(ghostSellLbl)
+
+if barstate.islast or barstate.islastconfirmedhistory
+    if not showGhostLines or hasActiveTrade
+        f_clearGhostBuy()
+        f_clearGhostSell()
+        ghostBuyLine := na
+        ghostBuyLbl := na
+        ghostSellLine := na
+        ghostSellLbl := na
+    else
+        float nearestSup = na
+        float nearestRes = na
+        float minSupDiff = 1e9
+        float minResDiff = 1e9
+
+        if snrList.size() > 0
+            for i = 0 to snrList.size() - 1
+                s = snrList.get(i)
+                if not s.isTriggered and (bar_index - s.lastUsedBar > 2)
+                    if s.isSup and s.p <= close
+                        diff = close - s.p
+                        if diff < minSupDiff
+                            minSupDiff := diff
+                            nearestSup := s.p
+                    else if not s.isSup and s.p >= close
+                        diff = s.p - close
+                        if diff < minResDiff
+                            minResDiff := diff
+                            nearestRes := s.p
+
+        ghostEnd = bar_index + ghostLength
+
+        if not na(nearestSup) and canBuyTrend
+            if na(ghostBuyLine)
+                ghostBuyLine := line.new(bar_index, nearestSup, ghostEnd, nearestSup, color = color.new(#00e5ff, 25), style = line.style_dashed, width = 1)
+            else
+                line.set_xy1(ghostBuyLine, bar_index, nearestSup)
+                line.set_xy2(ghostBuyLine, ghostEnd, nearestSup)
+            if showGhostLabels
+                gBuyTxt = "PROJECTED BUY @" + str.tostring(nearestSup, "#.##")
+                if na(ghostBuyLbl)
+                    ghostBuyLbl := label.new(ghostEnd, nearestSup, gBuyTxt, color = color.new(#004d40, 15), textcolor = #00e5ff, style = label.style_label_left, size = size.small)
+                else
+                    label.set_xy(ghostBuyLbl, ghostEnd, nearestSup)
+                    label.set_text(ghostBuyLbl, gBuyTxt)
+            else if not na(ghostBuyLbl)
+                label.delete(ghostBuyLbl)
+                ghostBuyLbl := na
+        else
+            f_clearGhostBuy()
+            ghostBuyLine := na
+            ghostBuyLbl := na
+
+        if not na(nearestRes) and canSellTrend
+            if na(ghostSellLine)
+                ghostSellLine := line.new(bar_index, nearestRes, ghostEnd, nearestRes, color = color.new(#ff5252, 25), style = line.style_dashed, width = 1)
+            else
+                line.set_xy1(ghostSellLine, bar_index, nearestRes)
+                line.set_xy2(ghostSellLine, ghostEnd, nearestRes)
+            if showGhostLabels
+                gSellTxt = "PROJECTED SELL @" + str.tostring(nearestRes, "#.##")
+                if na(ghostSellLbl)
+                    ghostSellLbl := label.new(ghostEnd, nearestRes, gSellTxt, color = color.new(#4a1414, 15), textcolor = #ff8a80, style = label.style_label_left, size = size.small)
+                else
+                    label.set_xy(ghostSellLbl, ghostEnd, nearestRes)
+                    label.set_text(ghostSellLbl, gSellTxt)
+            else if not na(ghostSellLbl)
+                label.delete(ghostSellLbl)
+                ghostSellLbl := na
+        else
+            f_clearGhostSell()
+            ghostSellLine := na
+            ghostSellLbl := na
+
+//=============================================================================
+// 9. DASHBOARD
+//=============================================================================
+tPos = dashPos == "Bottom Right" ? position.bottom_right : dashPos == "Bottom Center" ? position.bottom_center : dashPos == "Top Center" ? position.top_center : dashPos == "Top Right" ? position.top_right : dashPos == "Top Left" ? position.top_left : position.bottom_left
+tTodayPos = todayCardPos == "Top Right" ? position.top_right : todayCardPos == "Top Left" ? position.top_left : position.top_center
+
+var table board = table.new(tPos, 9, 15, bgcolor = color.new(#000000, 0), border_color = color.new(#333333, 0), border_width = 1)
+var table todayBoard = table.new(tTodayPos, 7, 2, bgcolor = color.new(#181a28, 5), border_color = color.new(#363459, 20), border_width = 1)
+
+f_fmtPts(float pts) =>
+    (pts >= 0 ? "+" : "-") + str.tostring(math.abs(pts), "#") + " pts"
+
+f_monthName(int m) =>
+    m == 1 ? "JAN" : m == 2 ? "FEB" : m == 3 ? "MAR" : m == 4 ? "APR" : m == 5 ? "MAY" : m == 6 ? "JUN" : m == 7 ? "JUL" : m == 8 ? "AUG" : m == 9 ? "SEP" : m == 10 ? "OCT" : m == 11 ? "NOV" : m == 12 ? "DEC" : "MONTH"
+
+f_dayName(int dow) =>
+    dow == dayofweek.monday ? "MON" : dow == dayofweek.tuesday ? "TUE" : dow == dayofweek.wednesday ? "WED" : dow == dayofweek.thursday ? "THU" : dow == dayofweek.friday ? "FRI" : dow == dayofweek.saturday ? "SAT" : "SUN"
+
+f_wr(Stat s) =>
+    s.trades > 0 ? math.round(s.wins * 100.0 / s.trades) : 0
+
+f_wrCol(int n, int wr) =>
+    n == 0 ? color.gray : (wr >= 70 ? #00e676 : (wr >= 50 ? #facc15 : #ff1744))
+
+f_ptsCol(int n, float pts) =>
+    n == 0 ? color.gray : (pts > 0 ? #00e676 : (pts < 0 ? #ff1744 : color.white))
+
+f_wlCol(int a, int b) =>
+    a > b ? #00e676 : (b > a ? #ff1744 : color.white)
+
+f_newStats(int n) =>
+    array<Stat> a = array.new<Stat>()
+    for i = 1 to n
+        a.push(Stat.new())
+    a
+
+f_cellL(int c, int r, string txt, color tc, color bg, string sz) =>
+    table.cell(board, c, r, txt, text_color = tc, text_size = sz, bgcolor = bg, text_halign = text.align_left)
+
+f_cellC(int c, int r, string txt, color tc, color bg, string sz) =>
+    table.cell(board, c, r, txt, text_color = tc, text_size = sz, bgcolor = bg, text_halign = text.align_center)
+
+f_cellR(int c, int r, string txt, color tc, color bg, string sz) =>
+    table.cell(board, c, r, txt, text_color = tc, text_size = sz, bgcolor = bg, text_halign = text.align_right)
+
+f_sumRow(int r, string lbl, Stat s, color bg) =>
+    int wr = f_wr(s)
+    f_cellL(0, r, lbl, color.white, bg, size.small)
+    f_cellC(1, r, str.tostring(s.trades), color.white, bg, size.small)
+    f_cellC(2, r, str.tostring(s.tp1), #00e676, bg, size.small)
+    f_cellC(3, r, str.tostring(s.tp2), #00e676, bg, size.small)
+    f_cellC(4, r, str.tostring(s.rec), color.white, bg, size.small)
+    f_cellC(5, r, str.tostring(s.sl), #ff1744, bg, size.small)
+    f_cellC(6, r, s.trades > 0 ? str.tostring(wr) + "%" : "-", f_wrCol(s.trades, wr), bg, size.small)
+    f_cellR(7, r, s.trades > 0 ? f_fmtPts(s.pts) : "-", f_ptsCol(s.trades, s.pts), bg, size.small)
+
+if showDash and (barstate.islast or barstate.islastconfirmedhistory)
+    cHeadBg   = color.new(#252243, 0)
+    cHeadTxt  = color.new(#b3b0d6, 0)
+    cTotBg    = color.new(#1e1e38, 0)
+    cCurWkBg  = color.new(#13293d, 0)
+    cRowAltBg = color.new(#181a28, 0)
+    cRowBg    = color.new(#1e2030, 0)
+
+    // ---- Month / week selection ----
+    numM = allMonthIds.size()
+    targetMonthId = curMonthId
+    isPrevFallback = false
+
+    if monthChoice == "Previous Month"
+        if numM >= 2
+            targetMonthId := allMonthIds.get(numM - 2)
+        else if numM == 1
+            targetMonthId := allMonthIds.get(0)
+            isPrevFallback := true
+    else if monthChoice == "Current Month"
+        if numM >= 1
+            targetMonthId := allMonthIds.get(numM - 1)
+    else if monthChoice == "Custom Month Offset"
+        targetIdx = numM - 1 - monthOffset
+        if targetIdx >= 0 and targetIdx < numM
+            targetMonthId := allMonthIds.get(targetIdx)
+        else if numM > 0
+            targetMonthId := allMonthIds.get(0)
+            isPrevFallback := true
+
+    targetWeeks = array.new<int>(0)
+    if monthChoice == "Last 4 Weeks"
+        nW = allWeekIds.size()
+        if nW > 0
+            startW = math.max(0, nW - 4)
+            for w = startW to nW - 1
+                targetWeeks.push(allWeekIds.get(w))
+
+    // ---- Aggregate statistics ----
+    Stat sToday = Stat.new()
+    Stat sYday  = Stat.new()
+    Stat sWeek  = Stat.new()
+    Stat sMonth = Stat.new()
+    Stat sAll   = Stat.new()
+    array<Stat> wkDay  = f_newStats(5)
+    array<Stat> cells  = f_newStats(25)
+    array<Stat> mWeeks = f_newStats(5)
+    array<Stat> mDays  = f_newStats(5)
+
+    float eq = 0.0
+    float eqPeak = 0.0
+    float maxDD = 0.0
+
+    if tradeHistory.size() > 0
+        for i = 0 to tradeHistory.size() - 1
+            t = tradeHistory.get(i)
+            sAll.addTrade(t)
+            eq += t.pts
+            eqPeak := math.max(eqPeak, eq)
+            maxDD := math.max(maxDD, eqPeak - eq)
+
+            if t.dayKey == curDayKey
+                sToday.addTrade(t)
+            if not na(prevDayKey) and t.dayKey == prevDayKey
+                sYday.addTrade(t)
+            if t.weekId == curWeekId
+                sWeek.addTrade(t)
+                if t.dowIdx >= 0 and t.dowIdx < 5
+                    wkDay.get(t.dowIdx).addTrade(t)
+
+            bool inTarget = false
+            int mappedW = t.weekOfMonth
+            if monthChoice == "Last 4 Weeks"
+                if targetWeeks.size() > 0
+                    for tw = 0 to targetWeeks.size() - 1
+                        if targetWeeks.get(tw) == t.weekId
+                            inTarget := true
+                            mappedW := tw
+                            break
+            else
+                inTarget := (t.monthId == targetMonthId)
+
+            if inTarget and mappedW >= 0 and mappedW < 5 and t.dowIdx >= 0 and t.dowIdx < 5
+                cells.get(mappedW * 5 + t.dowIdx).addTrade(t)
+                mWeeks.get(mappedW).addTrade(t)
+                mDays.get(t.dowIdx).addTrade(t)
+                sMonth.addTrade(t)
+
+    float pfVal = sAll.gl > 0 ? sAll.gp / sAll.gl : (sAll.gp > 0 ? 99.9 : 0.0)
+    float expPts = sAll.trades > 0 ? sAll.pts / sAll.trades : 0.0
+
+    tYear  = math.floor(targetMonthId / 100)
+    tMonth = targetMonthId % 100
+    mName  = f_monthName(tMonth) + " " + str.tostring(tYear)
+    headTitle = monthChoice == "Previous Month" ? (isPrevFallback ? mName + " (CUR)*" : "PREV: " + mName) : (monthChoice == "Last 4 Weeks" ? "LAST 4 WEEKS" : (monthChoice == "Custom Month Offset" ? "OFFSET " + str.tostring(monthOffset) + ": " + mName : mName))
+
+    // ---- Live order info ----
+    int aIdx = f_activeIdx()
+    bool isCurrentlyActive = aIdx >= 0
+    hasActiveTrade := isCurrentlyActive
+
+    liveSideTxt = "IDLE"
+    liveSideCol = color.gray
+    liveOrdTxt  = "-"
+    liveFltTxt  = "-"
+    liveFltCol  = color.gray
+    liveTp1DistTxt = "-"
+    liveSlDistTxt  = "-"
+
+    if isCurrentlyActive
+        PosPlan ap = plans.get(aIdx)
+        liveSideCol := ap.side == 1 ? color.green : color.red
+        liveSideTxt := (ap.side == 1 ? "BUY @" : "SELL @") + str.tostring(ap.e1, "#.##")
+        liveOrdTxt  := ap.e2Active ? "2 ORDERS (E2)" : "1 ORDER (E1)"
+        float totFloating = f_legPts(ap, close)
+        liveFltTxt := f_fmtPts(totFloating)
+        liveFltCol := totFloating >= 0 ? #00e676 : #ff1744
+        float distTp1 = ap.side * (ap.tp1 - close) / ptVal
+        float distSl  = ap.side * (close - ap.sl) / ptVal
+        liveTp1DistTxt := "TP1: " + (distTp1 > 0 ? "+" : "") + str.tostring(math.round(distTp1), "#") + " pts"
+        liveSlDistTxt  := "SL: " + (distSl > 0 ? "" : "-") + str.tostring(math.abs(math.round(distSl)), "#") + " pts"
+
+    curDayTitle = isWeekendNow ? "LAST SESSION (" + f_dayName(curTradingDow) + ")" : ("TODAY (" + f_dayName(curTradingDow) + ")")
+
+    table.set_position(board, tPos)
+    table.clear(board, 0, 0, 8, 14)
+
+    if dashView == "Vertical Today"
+        tSz = dashTextSize == "Tiny" ? size.tiny : dashTextSize == "Normal" ? size.normal : dashTextSize == "Large" ? size.large : size.small
+        int tdWr = f_wr(sToday)
+        cBlackBg = color.new(#000000, 0)
+        cRow1Bg  = color.new(#0d0d0d, 0)
+        cHdrBg   = color.new(#181818, 0)
+
+        f_cellC(0, 0, "MSC", color.white, cHdrBg, tSz)
+        f_cellC(1, 0, curDayTitle, color.white, cHdrBg, tSz)
+        f_cellC(0, 1, "TRADES", color.white, cBlackBg, tSz)
+        f_cellC(1, 1, str.tostring(sToday.trades), color.white, cBlackBg, tSz)
+        f_cellC(0, 2, "TP1", color.white, cRow1Bg, tSz)
+        f_cellC(1, 2, str.tostring(sToday.tp1), #00e676, cRow1Bg, tSz)
+        f_cellC(0, 3, "TP2", color.white, cBlackBg, tSz)
+        f_cellC(1, 3, str.tostring(sToday.tp2), #00e676, cBlackBg, tSz)
+        f_cellC(0, 4, "EXIT REC", color.white, cRow1Bg, tSz)
+        f_cellC(1, 4, str.tostring(sToday.rec), color.white, cRow1Bg, tSz)
+        f_cellC(0, 5, "SL", color.white, cBlackBg, tSz)
+        f_cellC(1, 5, str.tostring(sToday.sl), #ff1744, cBlackBg, tSz)
+        f_cellC(0, 6, "WIN RATE", color.white, cRow1Bg, tSz)
+        f_cellC(1, 6, sToday.trades > 0 ? str.tostring(tdWr) + "%" : "-", f_wrCol(sToday.trades, tdWr), cRow1Bg, tSz)
+        f_cellC(0, 7, "NET POINTS", color.white, cBlackBg, tSz)
+        f_cellC(1, 7, sToday.trades > 0 ? f_fmtPts(sToday.pts) : "-", f_ptsCol(sToday.trades, sToday.pts), cBlackBg, tSz)
+        f_cellC(0, 8, hasActiveTrade ? "ACTIVE" : "STATUS", color.white, cHdrBg, tSz)
+        f_cellC(1, 8, hasActiveTrade ? (liveSideTxt + " (" + liveFltTxt + ")") : "IDLE", hasActiveTrade ? liveSideCol : color.white, cHdrBg, tSz)
+
+    else if dashView == "Pro Summary"
+        f_cellL(0, 0, "MMC SCALPER PRO", color.white, cHeadBg, size.small)
+        f_cellC(1, 0, "TRADES", color.white, cHeadBg, size.small)
+        f_cellC(2, 0, "TP1", color.green, cHeadBg, size.small)
+        f_cellC(3, 0, "TP2", color.green, cHeadBg, size.small)
+        f_cellC(4, 0, "EXIT REC", color.white, cHeadBg, size.small)
+        f_cellC(5, 0, "SL", color.red, cHeadBg, size.small)
+        f_cellC(6, 0, "WIN RATE", color.white, cHeadBg, size.small)
+        f_cellR(7, 0, "NET POINTS", color.white, cHeadBg, size.small)
+
+        int nr = 1
+        f_sumRow(nr, curDayTitle, sToday, cRowBg)
+        nr += 1
+
+        if showHistoryRows and sYday.trades > 0
+            f_sumRow(nr, "YESTERDAY", sYday, cRowAltBg)
+            nr += 1
+        if showHistoryRows and sWeek.trades > sToday.trades
+            f_sumRow(nr, "THIS WEEK", sWeek, cRowBg)
+            nr += 1
+        if showHistoryRows
+            f_sumRow(nr, "TOTAL (ALL TIME)", sAll, cRowAltBg)
+            nr += 1
+
+        cHdr2 = color.new(#181818, 0)
+        f_cellL(0, nr, hasActiveTrade ? "ACTIVE ORDER" : "STATUS", color.white, cHdr2, size.small)
+        f_cellC(1, nr, liveSideTxt, liveSideCol, cHdr2, size.small)
+        f_cellC(2, nr, liveOrdTxt, color.white, cHdr2, size.small)
+        f_cellC(3, nr, hasActiveTrade ? liveTp1DistTxt : "PROFIT FACTOR", hasActiveTrade ? color.green : color.white, cHdr2, size.small)
+        f_cellC(4, nr, hasActiveTrade ? liveSlDistTxt : (pfVal > 0 ? str.tostring(pfVal, "#.##") : "-"), hasActiveTrade ? color.red : color.green, cHdr2, size.small)
+        f_cellC(5, nr, "FLOAT P/L", color.white, cHdr2, size.small)
+        f_cellC(6, nr, liveFltTxt, liveFltCol, cHdr2, size.small)
+        f_cellR(7, nr, sAll.trades > 0 ? "EXP: " + str.tostring(expPts, "#") + " | DD: " + str.tostring(maxDD, "#") : "-", color.white, cHdr2, size.small)
+        nr += 1
+
+        f_cellL(0, nr, "GOLD RADAR", color.white, cRowBg, size.small)
+        f_cellC(1, nr, marketRegimeTxt, marketRegimeCol, cRowBg, size.small)
+        f_cellC(2, nr, "ATR: " + str.tostring(math.round(atrVal / ptVal), "#") + " pts", color.white, cRowBg, size.small)
+        f_cellC(3, nr, "DAY RANGE", color.white, cRowBg, size.small)
+        f_cellC(4, nr, str.tostring(goldDayRangePts, "#") + " pts", color.white, cRowBg, size.small)
+        f_cellC(5, nr, "SESSION", color.white, cRowBg, size.small)
+        f_cellC(6, nr, goldSession, goldSessionCol, cRowBg, size.small)
+        f_cellR(7, nr, close > emaSlow ? "BULLISH" : "BEARISH", close > emaSlow ? color.green : color.red, cRowBg, size.small)
+
+    else if dashView == "Full Matrix"
+        f_cellL(0, 0, headTitle, cHeadTxt, cHeadBg, size.small)
+        f_cellC(1, 0, "MON", cHeadTxt, cHeadBg, size.small)
+        f_cellC(2, 0, "TUE", cHeadTxt, cHeadBg, size.small)
+        f_cellC(3, 0, "WED", cHeadTxt, cHeadBg, size.small)
+        f_cellC(4, 0, "THU", cHeadTxt, cHeadBg, size.small)
+        f_cellC(5, 0, "FRI", cHeadTxt, cHeadBg, size.small)
+        f_cellC(6, 0, "TOTAL", #facc15, cHeadBg, size.small)
+        f_cellC(7, 0, "WIN RATE", #00e676, cHeadBg, size.small)
+        f_cellC(8, 0, "POINTS", #facc15, cHeadBg, size.small)
+
+        for w = 0 to 4
+            int row = w + 1
+            string wLabel = "W" + str.tostring(w + 1)
+            bool isThisWeek = false
+
+            if monthChoice == "Last 4 Weeks"
+                if w < targetWeeks.size()
+                    int wid = targetWeeks.get(w)
+                    wLabel := str.tostring(math.floor((wid % 10000) / 100)) + "/" + str.tostring(wid % 100)
+                    isThisWeek := (wid == curWeekId)
+            else
+                isThisWeek := (curMonthId == targetMonthId and w == curWeekOfMonth)
+
+            rBg = isThisWeek ? cCurWkBg : (w % 2 == 0 ? cRowBg : cRowAltBg)
+            rTxtCol = isThisWeek ? #00bcd4 : cHeadTxt
+            f_cellL(0, row, wLabel, rTxtCol, rBg, size.small)
+
+            for d = 0 to 4
+                Stat c = cells.get(w * 5 + d)
+                f_cellC(d + 1, row, c.trades == 0 ? "-" : str.tostring(c.tp1) + "/" + str.tostring(c.sl), c.trades == 0 ? color.gray : f_wlCol(c.tp1, c.sl), rBg, size.small)
+
+            Stat ws = mWeeks.get(w)
+            int wWr = f_wr(ws)
+            f_cellC(6, row, str.tostring(ws.trades), color.white, rBg, size.small)
+            f_cellC(7, row, ws.trades > 0 ? str.tostring(wWr) + "%" : "-", f_wrCol(ws.trades, wWr), rBg, size.small)
+            f_cellC(8, row, ws.trades > 0 ? f_fmtPts(ws.pts) : "-", f_ptsCol(ws.trades, ws.pts), rBg, size.small)
+
+        f_cellL(0, 6, "DAY TOT", #facc15, cTotBg, size.small)
+        for d = 0 to 4
+            Stat ds = mDays.get(d)
+            f_cellC(d + 1, 6, ds.trades == 0 ? "-" : str.tostring(ds.tp1) + "/" + str.tostring(ds.sl), ds.trades == 0 ? color.gray : f_wlCol(ds.tp1, ds.sl), cTotBg, size.small)
+
+        int mWr = f_wr(sMonth)
+        f_cellC(6, 6, str.tostring(sMonth.trades), #facc15, cTotBg, size.small)
+        f_cellC(7, 6, sMonth.trades > 0 ? str.tostring(mWr) + "%" : "-", f_wrCol(sMonth.trades, mWr), cTotBg, size.small)
+        f_cellC(8, 6, sMonth.trades > 0 ? f_fmtPts(sMonth.pts) : "-", f_ptsCol(sMonth.trades, sMonth.pts), cTotBg, size.small)
+
+        int allWr = f_wr(sAll)
+        f_cellL(0, 7, hasActiveTrade ? "ACTIVE ORDER" : "STATUS", hasActiveTrade ? #facc15 : color.gray, cHeadBg, size.small)
+        f_cellC(1, 7, liveSideTxt, liveSideCol, cHeadBg, size.small)
+        f_cellC(2, 7, liveOrdTxt, color.white, cHeadBg, size.small)
+        f_cellC(3, 7, "FLOAT", cHeadTxt, cHeadBg, size.small)
+        f_cellC(4, 7, liveFltTxt, liveFltCol, cHeadBg, size.small)
+        f_cellC(5, 7, "ALL STATS", cHeadTxt, cHeadBg, size.small)
+        f_cellC(6, 7, str.tostring(sAll.trades), #facc15, cHeadBg, size.small)
+        f_cellC(7, 7, sAll.trades > 0 ? str.tostring(allWr) + "%" : "-", #00e676, cHeadBg, size.small)
+        f_cellC(8, 7, f_fmtPts(sAll.pts), #facc15, cHeadBg, size.small)
+
+    else if dashView == "Weekly Detail"
+        f_cellL(0, 0, "THIS WEEK (" + str.tostring(sWeek.trades) + " TRADES)", #00bcd4, cHeadBg, size.small)
+        f_cellC(1, 0, "TRADES", cHeadTxt, cHeadBg, size.small)
+        f_cellC(2, 0, "TP1 / SL", cHeadTxt, cHeadBg, size.small)
+        f_cellC(3, 0, "WIN RATE", cHeadTxt, cHeadBg, size.small)
+        f_cellR(4, 0, "NET POINTS", cHeadTxt, cHeadBg, size.small)
+
+        for d = 0 to 4
+            int row = d + 1
+            Stat ds = wkDay.get(d)
+            bool isToday = (d == curDowIdx)
+            rBg = isToday ? cCurWkBg : (d % 2 == 0 ? cRowBg : cRowAltBg)
+            rTxtCol = isToday ? #00e5ff : color.white
+            int dWr = f_wr(ds)
+            string dn = d == 0 ? "MON" : d == 1 ? "TUE" : d == 2 ? "WED" : d == 3 ? "THU" : "FRI"
+            f_cellL(0, row, dn + (isToday ? " (TODAY)" : ""), rTxtCol, rBg, size.small)
+            f_cellC(1, row, str.tostring(ds.trades), color.white, rBg, size.small)
+            f_cellC(2, row, str.tostring(ds.tp1) + " / " + str.tostring(ds.sl), f_wlCol(ds.tp1, ds.sl), rBg, size.small)
+            f_cellC(3, row, ds.trades > 0 ? str.tostring(dWr) + "%" : "-", f_wrCol(ds.trades, dWr), rBg, size.small)
+            f_cellR(4, row, ds.trades > 0 ? f_fmtPts(ds.pts) : "-", f_ptsCol(ds.trades, ds.pts), rBg, size.small)
+
+        int wkWr = f_wr(sWeek)
+        f_cellL(0, 6, "WEEK TOTAL", #facc15, cTotBg, size.small)
+        f_cellC(1, 6, str.tostring(sWeek.trades), #facc15, cTotBg, size.small)
+        f_cellC(2, 6, str.tostring(sWeek.tp1) + " / " + str.tostring(sWeek.sl), f_wlCol(sWeek.tp1, sWeek.sl), cTotBg, size.small)
+        f_cellC(3, 6, sWeek.trades > 0 ? str.tostring(wkWr) + "%" : "-", f_wrCol(sWeek.trades, wkWr), cTotBg, size.small)
+        f_cellR(4, 6, sWeek.trades > 0 ? f_fmtPts(sWeek.pts) : "-", f_ptsCol(sWeek.trades, sWeek.pts), cTotBg, size.small)
+
+        f_cellL(0, 7, hasActiveTrade ? "ACTIVE ORDER" : "STATUS", hasActiveTrade ? #facc15 : color.gray, cHeadBg, size.small)
+        f_cellC(1, 7, liveSideTxt, liveSideCol, cHeadBg, size.small)
+        f_cellC(2, 7, liveOrdTxt, color.white, cHeadBg, size.small)
+        f_cellC(3, 7, "FLOAT", cHeadTxt, cHeadBg, size.small)
+        f_cellR(4, 7, liveFltTxt, liveFltCol, cHeadBg, size.small)
+
+    else if dashView == "Daily Detail"
+        f_cellL(0, 0, curDayTitle, #00e5ff, cHeadBg, size.small)
+        f_cellC(1, 0, "METRIC", cHeadTxt, cHeadBg, size.small)
+        f_cellC(2, 0, "TODAY VALUE", #facc15, cHeadBg, size.small)
+        f_cellC(3, 0, "WEEK VALUE", #00bcd4, cHeadBg, size.small)
+        f_cellR(4, 0, "MONTH VALUE", #facc15, cHeadBg, size.small)
+
+        int tdW = f_wr(sToday)
+        int wkW = f_wr(sWeek)
+        int moW = f_wr(sMonth)
+
+        f_cellL(0, 1, "TOTAL TRADES", color.white, cRowBg, size.small)
+        f_cellC(1, 1, "Orders", color.gray, cRowBg, size.small)
+        f_cellC(2, 1, str.tostring(sToday.trades), #00e5ff, cRowBg, size.small)
+        f_cellC(3, 1, str.tostring(sWeek.trades), #00bcd4, cRowBg, size.small)
+        f_cellR(4, 1, str.tostring(sMonth.trades), color.white, cRowBg, size.small)
+
+        f_cellL(0, 2, "WIN / LOSS", color.white, cRowAltBg, size.small)
+        f_cellC(1, 2, "TP1 / SL", color.gray, cRowAltBg, size.small)
+        f_cellC(2, 2, str.tostring(sToday.tp1) + " / " + str.tostring(sToday.sl), f_wlCol(sToday.tp1, sToday.sl), cRowAltBg, size.small)
+        f_cellC(3, 2, str.tostring(sWeek.tp1) + " / " + str.tostring(sWeek.sl), f_wlCol(sWeek.tp1, sWeek.sl), cRowAltBg, size.small)
+        f_cellR(4, 2, str.tostring(sMonth.tp1) + " / " + str.tostring(sMonth.sl), f_wlCol(sMonth.tp1, sMonth.sl), cRowAltBg, size.small)
+
+        f_cellL(0, 3, "WIN RATE", color.white, cRowBg, size.small)
+        f_cellC(1, 3, "%", color.gray, cRowBg, size.small)
+        f_cellC(2, 3, sToday.trades > 0 ? str.tostring(tdW) + "%" : "-", f_wrCol(sToday.trades, tdW), cRowBg, size.small)
+        f_cellC(3, 3, sWeek.trades > 0 ? str.tostring(wkW) + "%" : "-", f_wrCol(sWeek.trades, wkW), cRowBg, size.small)
+        f_cellR(4, 3, sMonth.trades > 0 ? str.tostring(moW) + "%" : "-", f_wrCol(sMonth.trades, moW), cRowBg, size.small)
+
+        f_cellL(0, 4, "NET POINTS", color.white, cRowAltBg, size.small)
+        f_cellC(1, 4, "Points", color.gray, cRowAltBg, size.small)
+        f_cellC(2, 4, sToday.trades > 0 ? f_fmtPts(sToday.pts) : "-", f_ptsCol(sToday.trades, sToday.pts), cRowAltBg, size.small)
+        f_cellC(3, 4, sWeek.trades > 0 ? f_fmtPts(sWeek.pts) : "-", f_ptsCol(sWeek.trades, sWeek.pts), cRowAltBg, size.small)
+        f_cellR(4, 4, sMonth.trades > 0 ? f_fmtPts(sMonth.pts) : "-", f_ptsCol(sMonth.trades, sMonth.pts), cRowAltBg, size.small)
+
+        f_cellL(0, 5, hasActiveTrade ? "ACTIVE ORDER" : "STATUS", color.white, cHeadBg, size.small)
+        f_cellC(1, 5, liveSideTxt, liveSideCol, cHeadBg, size.small)
+        f_cellC(2, 5, liveOrdTxt, color.white, cHeadBg, size.small)
+        f_cellC(3, 5, "FLOAT P/L", cHeadTxt, cHeadBg, size.small)
+        f_cellR(4, 5, liveFltTxt, liveFltCol, cHeadBg, size.small)
+
+    // ---- Optional standalone Today box ----
+    table.clear(todayBoard, 0, 0, 6, 1)
+    if showTodayCard
+        tSz2 = todayCardSize == "Large" ? size.large : todayCardSize == "Small" ? size.small : size.normal
+        int tdWrBox = f_wr(sToday)
+        table.cell(todayBoard, 0, 0, curDayTitle, text_color = #00e5ff, text_size = tSz2, bgcolor = cHeadBg)
+        table.cell(todayBoard, 1, 0, "TRADES: " + str.tostring(sToday.trades), text_color = color.white, text_size = tSz2, bgcolor = cRowBg)
+        table.cell(todayBoard, 2, 0, "W/L: " + str.tostring(sToday.wins) + "/" + str.tostring(sToday.trades - sToday.wins), text_color = #facc15, text_size = tSz2, bgcolor = cRowBg)
+        table.cell(todayBoard, 3, 0, "WIN: " + (sToday.trades > 0 ? str.tostring(tdWrBox) + "%" : "-"), text_color = f_wrCol(sToday.trades, tdWrBox), text_size = tSz2, bgcolor = cRowBg)
+        table.cell(todayBoard, 4, 0, "PTS: " + (sToday.trades > 0 ? f_fmtPts(sToday.pts) : "-"), text_color = f_ptsCol(sToday.trades, sToday.pts), text_size = tSz2, bgcolor = cRowBg)
+        table.cell(todayBoard, 5, 0, hasActiveTrade ? liveSideTxt : "IDLE", text_color = hasActiveTrade ? liveSideCol : color.gray, text_size = tSz2, bgcolor = cHeadBg)
+        table.cell(todayBoard, 6, 0, hasActiveTrade ? ("FLT: " + liveFltTxt) : "-", text_color = hasActiveTrade ? liveFltCol : color.gray, text_size = tSz2, bgcolor = cHeadBg)
+
+else if not showDash and (barstate.islast or barstate.islastconfirmedhistory)
+    table.clear(board, 0, 0, 8, 14)
+    table.clear(todayBoard, 0, 0, 6, 1)
+
+//=============================================================================
+// 10. ALERT CONDITIONS & VISUALS
+//=============================================================================
+alertcondition(sigBuy, title = "BUY Signal", message = "MSC BUY signal on {{ticker}} (close {{close}})")
+alertcondition(sigSell, title = "SELL Signal", message = "MSC SELL signal on {{ticker}} (close {{close}})")
+
+barcolor(isSpikeNews ? color.new(#ff1744, 40) : na, title = "News Spike Bar Highlight")
